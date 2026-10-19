@@ -773,21 +773,42 @@ export function TransactionHistory() {
   }, [paginatedTransactions]);
 
   const stats = useMemo(() => {
-    const completedTxs = allTransactions.filter(
+    // Outstanding balance: authoritative sum of utilized from non-Closed lines.
+    // This matches the per-line balances shown on /credit-lines and the Dashboard,
+    // and correctly accounts for interest, fees and partial adjustments that a
+    // simple draws-minus-repays flow calculation cannot capture.
+    const outstandingBalance = MOCK_CREDIT_LINES.filter(
+      (cl) => cl.status !== "Closed",
+    ).reduce((s, cl) => s + cl.utilized, 0);
+
+    // Flow cards are scoped to filteredTransactions so their values change when
+    // filters (date range, line, type) are applied — making the scope explicit.
+    const completedFiltered = filteredTransactions.filter(
       (tx) => tx.status === "Completed",
     );
-    const totalDrawn = completedTxs
+    const totalDrawn = completedFiltered
       .filter((tx) => tx.type === "Draw")
       .reduce((s, tx) => s + tx.amount, 0);
-    const totalRepaid = completedTxs
+    const totalRepaid = completedFiltered
       .filter((tx) => tx.type === "Repay")
       .reduce((s, tx) => s + tx.amount, 0);
-    const totalInterest = completedTxs
-      .filter((tx) => tx.type === "Interest")
+    // Interest & fees: both Interest and Fee rows count against the borrower.
+    const totalInterestAndFees = completedFiltered
+      .filter((tx) => tx.type === "Interest" || tx.type === "Fee")
       .reduce((s, tx) => s + tx.amount, 0);
-    const currentDebt = totalDrawn - totalRepaid;
-    return { totalDrawn, totalRepaid, totalInterest, currentDebt };
-  }, [allTransactions]);
+
+    // Reconciliation: ledger net (draws − repays − fees/interest) vs outstanding balance.
+    // Only meaningful when a single credit line is selected.
+    const ledgerNet = totalDrawn - totalRepaid - totalInterestAndFees;
+
+    return {
+      outstandingBalance,
+      totalDrawn,
+      totalRepaid,
+      totalInterestAndFees,
+      ledgerNet,
+    };
+  }, [filteredTransactions]);
 
   const exportDisabled = filteredTransactions.length === 0;
 
@@ -1290,6 +1311,31 @@ export function TransactionHistory() {
       </p>
 
       <div className="th-stats">
+        {/* Outstanding balance — derived from authoritative line balances, not flow math */}
+        <div className="th-stat-card">
+          <span
+            className="th-stat-icon"
+            style={{ background: "rgba(248,81,73,0.12)", color: COLOR.danger }}
+          >
+            💳
+          </span>
+          <div className="th-stat-content">
+            <span className="th-stat-label">Outstanding Balance</span>
+            <span
+              className="th-stat-value num-tabular"
+              style={{
+                color:
+                  stats.outstandingBalance > 0 ? COLOR.danger : COLOR.success,
+              }}
+            >
+              {stats.outstandingBalance > 0
+                ? fmt(stats.outstandingBalance)
+                : fmt(0)}
+            </span>
+          </div>
+        </div>
+
+        {/* Flow cards — scoped to the current filter selection */}
         <div className="th-stat-card">
           <span
             className="th-stat-icon"
@@ -1298,7 +1344,10 @@ export function TransactionHistory() {
             ↗
           </span>
           <div className="th-stat-content">
-            <span className="th-stat-label">Total Drawn</span>
+            <span className="th-stat-label">
+              Total Drawn
+              <span className="th-stat-scope"> in selected range</span>
+            </span>
             <span
               className="th-stat-value num-tabular"
               style={{ color: COLOR.accent }}
@@ -1315,7 +1364,10 @@ export function TransactionHistory() {
             ↙
           </span>
           <div className="th-stat-content">
-            <span className="th-stat-label">Total Repaid</span>
+            <span className="th-stat-label">
+              Total Repaid
+              <span className="th-stat-scope"> in selected range</span>
+            </span>
             <span
               className="th-stat-value num-tabular"
               style={{ color: COLOR.success }}
@@ -1335,34 +1387,60 @@ export function TransactionHistory() {
             📈
           </span>
           <div className="th-stat-content">
-            <span className="th-stat-label">Total Interest</span>
+            <span className="th-stat-label">
+              Interest &amp; Fees
+              <span className="th-stat-scope"> in selected range</span>
+            </span>
             <span
               className="th-stat-value num-tabular"
               style={{ color: COLOR.warning }}
             >
-              {fmt(stats.totalInterest)}
+              {fmt(stats.totalInterestAndFees)}
             </span>
           </div>
         </div>
-        <div className="th-stat-card">
-          <span
-            className="th-stat-icon"
-            style={{ background: "rgba(248,81,73,0.12)", color: COLOR.danger }}
-          >
-            💳
-          </span>
-          <div className="th-stat-content">
-            <span className="th-stat-label">Current Debt</span>
-            <span
-              className="th-stat-value num-tabular"
-              style={{
-                color: stats.currentDebt > 0 ? COLOR.danger : COLOR.success,
-              }}
+
+        {/* Reconciliation hint — visible only when a single credit line is filtered */}
+        {selectedLine !== "all" && (() => {
+          const line = MOCK_CREDIT_LINES.find((cl) => cl.id === selectedLine);
+          if (!line) return null;
+          const diff = stats.ledgerNet - line.utilized;
+          if (diff === 0) return null;
+          const absDiff = Math.abs(diff);
+          return (
+            <div
+              className="th-stat-card th-stat-card--reconciliation"
+              title="The ledger net (draws − repays − fees/interest in the selected range) differs from the authoritative line balance. The gap is caused by transactions outside the selected date range, accrued interest, adjustments, or rounding."
             >
-              {fmt(Math.abs(stats.currentDebt))}
-            </span>
-          </div>
-        </div>
+              <span
+                className="th-stat-icon"
+                style={{
+                  background: "rgba(139,148,158,0.12)",
+                  color: COLOR.muted,
+                }}
+              >
+                ⚖
+              </span>
+              <div className="th-stat-content">
+                <span className="th-stat-label">
+                  Ledger net vs balance
+                  <span className="th-stat-scope"> ⓘ</span>
+                </span>
+                <span
+                  className="th-stat-value num-tabular"
+                  style={{ color: COLOR.muted }}
+                >
+                  {diff > 0 ? "+" : "−"}
+                  {fmt(absDiff)}{" "}
+                  <span style={{ fontSize: "0.75em" }}>difference</span>
+                </span>
+                <span className="th-stat-hint">
+                  interest / fees / adjustments outside range
+                </span>
+              </div>
+            </div>
+          );
+        })()}
       </div>
 
       <div className="th-filters">
